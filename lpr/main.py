@@ -2,16 +2,22 @@ import cv2
 import numpy as np
 import uuid
 from fastapi import FastAPI, File, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import JSONResponse
 import shutil
 import os
 import easyocr
+import base64
 
 # Inicializando a aplicação FastAPI
 app = FastAPI()
 
 # Inicializando o leitor EasyOCR
 reader = easyocr.Reader(['en', 'pt'])
+
+# Função para converter uma imagem para base64
+def image_to_base64(image: np.ndarray) -> str:
+    _, buffer = cv2.imencode('.jpg', image)
+    return base64.b64encode(buffer).decode('utf-8')
 
 @app.post("/process-image/")
 async def process_image(file: UploadFile = File(...)):
@@ -55,7 +61,7 @@ async def process_image(file: UploadFile = File(...)):
     # Salvar a imagem com os retângulos da detecção (sem cortar a placa ainda)
     image_with_rectangles = image.copy()
     plate_texts = []  # Lista para armazenar os textos das placas
-
+    plate_file_path = ""
     if len(plates) == 0:
         # Caso nenhuma placa seja detectada, adicionar o texto 'Nenhuma placa detectada'
         font = cv2.FONT_HERSHEY_SIMPLEX
@@ -132,12 +138,23 @@ async def process_image(file: UploadFile = File(...)):
     # Empilhar as linhas agora com o mesmo tamanho
     mosaic = np.vstack(rows_padded)
 
-    # Salvar o mosaico final na pasta 'result'
-    mosaic_file_path = f"{result_dir}/{uuid.uuid4()}.jpg"
-    cv2.imwrite(mosaic_file_path, mosaic)
+    # Converter o mosaico para base64
+    mosaic_base64 = image_to_base64(mosaic)
 
-    # Retornar o arquivo do mosaico como resposta
-    return {"mosaic_file": mosaic_file_path, "plate_texts": plate_texts}
+    # Deletar o arquivo temporário
+    if os.path.exists(temp_file_path):
+        os.remove(temp_file_path)
+
+    if os.path.exists(plate_file_path):
+        os.remove(plate_file_path)
+
+        
+
+    # Retornar o mosaico e os textos das placas
+    return JSONResponse(content={
+        "mosaic_base64": mosaic_base64,
+        "plate_texts": plate_texts
+    })
 
 # Iniciar o servidor Uvicorn com o comando:
 # uvicorn nome_do_arquivo:app --reload
