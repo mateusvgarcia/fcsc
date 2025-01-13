@@ -1,22 +1,38 @@
 package main
 
 import (
-	"fmt"
-	"log"
-	"net"
-	"net/http"
-	"sync"
-	"strings"
-	"encoding/base64"
-	"os"
-	"github.com/gorilla/websocket"
 	"bytes"
-	"mime/multipart"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
 	"io"
 	"io/ioutil"
-	 "encoding/json"
-	 "github.com/google/uuid"
+	"log"
+	"mime/multipart"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
+
+var database *gorm.DB
+
+func init() {
+	db, err := gorm.Open(sqlite.Open("database.db"), &gorm.Config{})
+	if err != nil {
+		log.Fatal("erro ao conectar com o banco de dados: ", err)
+	}
+
+	database = db
+}
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
@@ -26,9 +42,9 @@ var upgrader = websocket.Upgrader{
 
 // Estrutura do servidor WebSocket
 type WebSocketServer struct {
-	clients   map[*websocket.Conn]bool  // Lista de conexões ativas
-	broadcast chan Message              // Canal para mensagens (inclui remetente)
-	mu        sync.Mutex                // Mutex para gerenciar concorrência
+	clients   map[*websocket.Conn]bool // Lista de conexões ativas
+	broadcast chan Message             // Canal para mensagens (inclui remetente)
+	mu        sync.Mutex               // Mutex para gerenciar concorrência
 }
 
 // Estrutura da mensagem com remetente
@@ -38,8 +54,8 @@ type Message struct {
 }
 
 type ProcessResponse struct {
-	Mosaic_base64 string `json:"mosaic_base64"`
-	Plate_texts []string `json:"plate_texts"`
+	Mosaic_base64 string   `json:"mosaic_base64"`
+	Plate_texts   []string `json:"plate_texts"`
 }
 
 // Inicializa o servidor WebSocket
@@ -67,14 +83,14 @@ func (server *WebSocketServer) handleClient(conn *websocket.Conn) {
 			log.Println("Conexão encerrada ou erro:", err)
 			break
 		}
-		
+
 		if strings.Contains(string(msg), "base64: ") {
 			err := os.MkdirAll("./results", os.ModePerm)
 			if err != nil {
 				fmt.Println("Erro ao criar a pasta:", err)
 				return
 			}
-		
+
 			id := uuid.New()
 			err = saveBase64Image(string(msg[8:]), "./results/original_"+id.String()+".jpg")
 			if err != nil {
@@ -83,12 +99,22 @@ func (server *WebSocketServer) handleClient(conn *websocket.Conn) {
 				fmt.Println("Imagem salva com sucesso!")
 			}
 
+			dataDatabase := AccessLog{
+				CreatedAt:     time.Now().Format("02/01/2006 15:04:05"),
+				OriginalImage: "original_" + id.String() + ".jpg",
+			}
+
+			result := database.Create(&dataDatabase)
+			if result.Error != nil {
+				fmt.Println("Erro ao salvar no banco de dados:", result.Error)
+			}
 
 			url := "http://localhost:8001/process-image/" // URL para onde você vai enviar o POST
 
 			data, err := sendPostRequest(url, "./results/original_"+id.String()+".jpg")
 			if err != nil {
 				fmt.Println("Erro:", err)
+				continue
 			} else {
 				fmt.Println("Arquivo enviado com sucesso!")
 			}
@@ -101,13 +127,34 @@ func (server *WebSocketServer) handleClient(conn *websocket.Conn) {
 			}
 
 			fmt.Println("Placas detectadas:", data.Plate_texts)
+			for _, plate := range data.Plate_texts {
+				var allowedPlate AllowedPlates
+				result := database.Where("plate = ? and status = ?", plate, true).First(&allowedPlate)
+				if result.Error != nil {
+					fmt.Println("Erro ao buscar placa no banco de dados:", result.Error)
+					continue
+				}
+
+				if allowedPlate.Status {
+					dataDatabase.Status = true
+					fmt.Println("Placa permitida:", plate)
+					break
+				}
+
+				dataDatabase.Status = false
+			}
+
+			dataDatabase.ResultImage = "result_" + id.String() + ".jpg"
+			dataDatabase.Plate = strings.Join(data.Plate_texts, ", ")
+			result = database.Save(&dataDatabase)
+			if result.Error != nil {
+				fmt.Println("Erro ao salvar no banco de dados:", result.Error)
+			}
 
 			continue
 		}
-		
+
 		log.Printf("Mensagem recebida de %v: %s\n", conn.RemoteAddr(), msg)
-
-
 
 		// Envia a mensagem para o canal de broadcast
 		server.broadcast <- Message{sender: conn, message: msg}
@@ -136,7 +183,28 @@ func (server *WebSocketServer) run() {
 	}
 }
 
+type AllowedPlates struct {
+	ID        uint   `gorm:"primaryKey"`
+	CreatedAt string `gorm:"autoCreateTime"`
+	Plate     string `gorm:"unique"`
+	Status    bool
+}
+
+type AccessLog struct {
+	ID            uint   `gorm:"primaryKey"`
+	CreatedAt     string `gorm:"autoCreateTime"`
+	Plate         string
+	OriginalImage string
+	ResultImage   string
+	Status        bool `gorm:"default:false"`
+}
+
 func main() {
+	err := database.AutoMigrate(&AllowedPlates{}, &AccessLog{})
+	if err != nil {
+		log.Fatal("erro ao migrar o modelo: ", err)
+	}
+
 	fmt.Println("Iniciando servidor WebSocket...")
 
 	server := NewWebSocketServer()
@@ -144,45 +212,167 @@ func main() {
 	// Goroutine para gerenciar o broadcast
 	go server.run()
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			log.Println("Erro ao aceitar conexão:", err)
+	// Iniciar o servidor WebSocket
+	go func() {
+		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			upgrader.CheckOrigin = func(r *http.Request) bool {
+				return true
+			}
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				log.Println("Erro ao aceitar conexão:", err)
+				return
+			}
+
+			server.mu.Lock()
+			server.clients[conn] = true
+			server.mu.Unlock()
+
+			// Goroutine para lidar com o cliente
+			go server.handleClient(conn)
+		})
+
+		// Iniciar o servidor WebSocket na porta 8000
+		fmt.Println("Servidor WebSocket está rodando em: ws://localhost:8000/ws")
+		if err := http.ListenAndServe(":8000", nil); err != nil {
+			log.Fatal("Erro ao iniciar o servidor WebSocket:", err)
+		}
+	}()
+
+	// Usando Gin para configurar as rotas da API
+	router := gin.Default()
+
+	// API RESTful
+	router.GET("/status", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"status": "Servidor em funcionamento",
+		})
+	})
+
+	router.GET("/getAccess", func(c *gin.Context) {
+		var accessLogs []AccessLog
+		result := database.Find(&accessLogs).Order("id desc")
+		if result.Error != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": result.Error.Error(),
+			})
 			return
 		}
 
-		server.mu.Lock()
-		server.clients[conn] = true
-		server.mu.Unlock()
-
-		// Goroutine para lidar com o cliente
-		go server.handleClient(conn)
+		c.JSON(http.StatusOK, accessLogs)
 	})
 
-	// Obter o IP local
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		log.Fatal("Erro ao obter o IP:", err)
-	}
+	router.GET("/getAccess/:id", func(c *gin.Context) {
+		id := c.Param("id")
 
-	var localIP string
-	for _, addr := range addrs {
-		if ipNet, ok := addr.(*net.IPNet); ok && !ipNet.IP.IsLoopback() && ipNet.IP.To4() != nil {
-			localIP = ipNet.IP.String()
-			break
+		var accessLog AccessLog
+		result := database.First(&accessLog, id)
+		if result.Error != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": result.Error.Error(),
+			})
+			return
 		}
-	}
 
-	if localIP == "" {
-		localIP = "localhost"
-	}
+		c.JSON(http.StatusOK, accessLog)
+	})
 
-	fmt.Printf("Servidor WebSocket está rodando em: ws://%s:8000\n", localIP)
+	router.GET("/image/:filename", func(c *gin.Context) {
+		filename := c.Param("filename")
+		imagePath := filepath.Join("./results", filename)
+		if _, err := os.Stat(imagePath); os.IsNotExist(err) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Imagem não encontrada"})
+			return
+		}
+		c.File(imagePath)
+	})
 
-	// Iniciar o servidor HTTP
-	if err := http.ListenAndServe(":8000", nil); err != nil {
-		log.Fatal("Erro ao iniciar o servidor:", err)
-	}
+	router.POST("/addPlate", func(c *gin.Context) {
+		var plate AllowedPlates
+		err := c.BindJSON(&plate)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": err.Error(),
+			})
+			return
+		}
+
+		plate.CreatedAt = time.Now().Format("02/01/2006 15:04:05")
+		plate.Status = true
+
+		result := database.Create(&plate)
+		if result.Error != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": result.Error.Error(),
+			})
+
+			return
+		}
+
+		c.JSON(http.StatusCreated, plate)
+	})
+
+	router.GET("/getPlates", func(c *gin.Context) {
+		var plates []AllowedPlates
+		result := database.Find(&plates).Order("id desc")
+		if result.Error != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": result.Error.Error(),
+			})
+
+			return
+		}
+
+		c.JSON(http.StatusOK, plates)
+	})
+
+	router.PATCH("/updatePlate/:id", func(c *gin.Context) {
+		id := c.Param("id")
+
+		var plate AllowedPlates
+		result := database.First(&plate, id)
+		if result.Error != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": result.Error.Error(),
+			})
+
+			return
+		}
+
+		var newPlate AllowedPlates
+		err := c.BindJSON(&newPlate)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": err.Error(),
+			})
+
+			return
+		}
+
+		plate.Status = newPlate.Status
+
+		result = database.Save(&plate)
+		if result.Error != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": result.Error.Error(),
+			})
+
+			return
+		}
+
+		c.JSON(http.StatusOK, plate)
+	})
+
+	// Iniciar servidor Gin na porta 8080
+	go func() {
+		fmt.Println("Servidor Gin está rodando em: http://localhost:8080")
+		if err := router.Run(":8080"); err != nil {
+			log.Fatal("Erro ao iniciar o servidor Gin:", err)
+		}
+	}()
+
+	// Manter o servidor principal ativo
+	select {}
 }
 
 func saveBase64Image(base64String, filePath string) error {
@@ -216,66 +406,47 @@ func sendPostRequest(url string, filePath string) (ProcessResponse, error) {
 	}
 	defer file.Close()
 
-	// Cria um buffer para armazenar os dados da requisição
+	// Cria o corpo da requisição multipart
 	body := &bytes.Buffer{}
-	// Cria o escritor multipart que adicionará os campos e o arquivo
 	writer := multipart.NewWriter(body)
-
-	// Adiciona o arquivo ao corpo da requisição
-	part, err := writer.CreateFormFile("file", filePath)
+	part, err := writer.CreateFormFile("file", file.Name())
 	if err != nil {
-		return ProcessResponse{}, fmt.Errorf("erro ao criar o campo do arquivo: %v", err)
+		return ProcessResponse{}, fmt.Errorf("erro ao criar campo de arquivo: %v", err)
 	}
-	// Copia o conteúdo do arquivo para o campo de arquivo
 	_, err = io.Copy(part, file)
 	if err != nil {
-		return ProcessResponse{}, fmt.Errorf("erro ao copiar o arquivo: %v", err)
+		return ProcessResponse{}, fmt.Errorf("erro ao copiar conteúdo do arquivo: %v", err)
 	}
+	writer.Close()
 
-	// Adiciona outros campos, se necessário
-	err = writer.WriteField("field1", "value1")
+	// Envia a requisição POST
+	request, err := http.NewRequest("POST", url, body)
 	if err != nil {
-		return  ProcessResponse{}, fmt.Errorf("erro ao adicionar campo: %v", err)
+		return ProcessResponse{}, fmt.Errorf("erro ao criar requisição: %v", err)
 	}
 
-	// Finaliza o corpo da requisição
-	err = writer.Close()
-	if err != nil {
-		return  ProcessResponse{}, fmt.Errorf("erro ao fechar o writer: %v", err)
-	}
+	// Define o tipo do conteúdo da requisição
+	request.Header.Set("Content-Type", writer.FormDataContentType())
 
-	// Cria a requisição HTTP
-	req, err := http.NewRequest("POST", url, body)
-	if err != nil {
-		return  ProcessResponse{}, fmt.Errorf("erro ao criar requisição: %v", err)
-	}
-
-	// Define o cabeçalho Content-Type com o tipo correto
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-
-	// Envia a requisição
 	client := &http.Client{}
-	resp, err := client.Do(req)
+	response, err := client.Do(request)
 	if err != nil {
-		return  ProcessResponse{}, fmt.Errorf("erro ao enviar requisição: %v", err)
+		return ProcessResponse{}, fmt.Errorf("erro ao enviar requisição: %v", err)
 	}
-	defer resp.Body.Close()
+	defer response.Body.Close()
 
-	// Lê o corpo da resposta
-	respBody, err := ioutil.ReadAll(resp.Body)
+	// Lê a resposta
+	respBody, err := ioutil.ReadAll(response.Body)
 	if err != nil {
-		return  ProcessResponse{}, fmt.Errorf("erro ao ler o corpo da resposta: %v", err)
-	}
-
-	// // Exibe a resposta e o conteúdo do corpo
-	// fmt.Println("Status:", resp.Status)
-	// fmt.Println("Corpo da resposta:", string(respBody))
-
-	var processResponse ProcessResponse
-	err = json.Unmarshal(respBody, &processResponse)
-	if err != nil {
-		return  ProcessResponse{}, fmt.Errorf("erro ao decodificar JSON: %v", err)
+		return ProcessResponse{}, fmt.Errorf("erro ao ler resposta: %v", err)
 	}
 
-	return processResponse, nil
+	// Parse a resposta JSON
+	var data ProcessResponse
+	err = json.Unmarshal(respBody, &data)
+	if err != nil {
+		return ProcessResponse{}, fmt.Errorf("erro ao fazer unmarshal: %v", err)
+	}
+
+	return data, nil
 }

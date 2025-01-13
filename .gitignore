@@ -1,3 +1,6 @@
 
 lpr/lpr
-lpr/results
+lpr/result
+lpr/.venv
+lpr/venv
+backend/results

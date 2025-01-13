@@ -1,74 +1,201 @@
-import { Image, StyleSheet, Platform } from 'react-native';
-
-import { HelloWave } from '@/components/HelloWave';
-import ParallaxScrollView from '@/components/ParallaxScrollView';
-import { ThemedText } from '@/components/ThemedText';
-import { ThemedView } from '@/components/ThemedView';
+import {
+  View,
+  Text,
+  StyleSheet,
+  ScrollView,
+  Switch,
+  Button,
+} from "react-native";
+import React, { useState, useEffect } from "react";
+import { api } from "../api"; // Já importado
+import { useFocusEffect } from "@react-navigation/native"; // Importa o hook
+import { useRouter } from "expo-router";
 
 export default function HomeScreen() {
+  const [data, setData] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const router = useRouter();
+
+  const fetchData = () => {
+    setData([] as any);
+    setLoading(true);
+    setError(null);
+    api
+      .get("/getPlates")
+      .then((response) => {
+        setData(
+          response.data.map((item: any) => ({ ...item, toggle: item.Status }))
+        );
+        setLoading(false);
+      })
+      .catch((err) => {
+        console.log(err);
+        setError(err);
+        setLoading(false);
+      });
+  };
+
+  useEffect(() => {
+    fetchData();
+  }, []);
+
+  useFocusEffect(
+    React.useCallback(() => {
+      fetchData();
+    }, [])
+  );
+
+  function HandleSwitch(id: number, value: boolean) {
+    api
+      .patch("/updatePlate/" + id, { status: value })
+      .then((response) => {
+        console.log(response.data);
+      })
+      .catch((err) => {
+        console.log(err);
+      });
+
+    let newData = data.map((item: any) =>
+      item.ID === id ? { ...item, Status: value } : item
+    );
+
+    setData(newData as any);
+  }
+
+  function handleAdd() {
+    router.push("/newplate");
+  }
+
   return (
-    <ParallaxScrollView
-      headerBackgroundColor={{ light: '#A1CEDC', dark: '#1D3D47' }}
-      headerImage={
-        <Image
-          source={require('@/assets/images/partial-react-logo.png')}
-          style={styles.reactLogo}
-        />
-      }>
-      <ThemedView style={styles.titleContainer}>
-        <ThemedText type="title">Welcome!</ThemedText>
-        <HelloWave />
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 1: Try it</ThemedText>
-        <ThemedText>
-          Edit <ThemedText type="defaultSemiBold">app/(tabs)/index.tsx</ThemedText> to see changes.
-          Press{' '}
-          <ThemedText type="defaultSemiBold">
-            {Platform.select({
-              ios: 'cmd + d',
-              android: 'cmd + m',
-              web: 'F12'
-            })}
-          </ThemedText>{' '}
-          to open developer tools.
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 2: Explore</ThemedText>
-        <ThemedText>
-          Tap the Explore tab to learn more about what's included in this starter app.
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 3: Get a fresh start</ThemedText>
-        <ThemedText>
-          When you're ready, run{' '}
-          <ThemedText type="defaultSemiBold">npm run reset-project</ThemedText> to get a fresh{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> directory. This will move the current{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> to{' '}
-          <ThemedText type="defaultSemiBold">app-example</ThemedText>.
-        </ThemedText>
-      </ThemedView>
-    </ParallaxScrollView>
+    <View style={styles.container}>
+      <Button title="Adicionar Novo Registro" onPress={handleAdd} />
+      <ScrollView style={styles.tableContainer}>
+        {data.length === 0 && !loading && !error ? (
+          <View style={styles.noDataContainer}>
+            <Text style={styles.noDataText}>Nenhum registro encontrado</Text>
+          </View>
+        ) : (
+          <View style={styles.table}>
+            <View style={styles.rowHeader}>
+              <Text style={styles.headerCell}>Placa</Text>
+              <Text style={styles.headerCell}>Data</Text>
+              <Text style={styles.headerCell}>Situação</Text>
+              <Text style={styles.headerCell}>Ação</Text>
+            </View>
+
+            {loading && <Text style={styles.textPadding}>Carregando...</Text>}
+            {error && (
+              <Text style={styles.textPadding}>Erro ao carregar os dados</Text>
+            )}
+
+            {data.map((item: any, index) => (
+              <View
+                key={index}
+                style={[
+                  styles.row,
+                  index !== data.length - 1 && styles.rowWithLine,
+                ]}
+              >
+                <Text style={styles.cell}>{item.Plate || "-"}</Text>
+                <Text style={styles.cell}>{item.CreatedAt}</Text>
+                <Text
+                  style={[
+                    styles.cell,
+                    item.Status ? styles.authorized : styles.denied,
+                  ]}
+                >
+                  {item.Status ? "Ativo" : "Inativo"}
+                </Text>
+                <View style={styles.switchCell}>
+                  <Switch
+                    value={item.Status}
+                    onValueChange={() => HandleSwitch(item.ID, !item.Status)}
+                    disabled={false}
+                  />
+                </View>
+              </View>
+            ))}
+          </View>
+        )}
+      </ScrollView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  titleContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
+  container: {
+    flex: 1,
+    backgroundColor: "black",
+    paddingTop: 50,
+    paddingHorizontal: 20,
   },
-  stepContainer: {
-    gap: 8,
-    marginBottom: 8,
+  tableContainer: {
+    flex: 1,
+    marginTop: 10,
   },
-  reactLogo: {
-    height: 178,
-    width: 290,
-    bottom: 0,
-    left: 0,
-    position: 'absolute',
+  table: {
+    width: "100%",
+    borderWidth: 1,
+    borderColor: "#555",
+    borderRadius: 8,
+  },
+  rowHeader: {
+    flexDirection: "row",
+    backgroundColor: "#3498db",
+    borderBottomWidth: 1,
+    borderBottomColor: "#555",
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+  },
+  headerCell: {
+    flex: 1,
+    textAlign: "center",
+    color: "white",
+    fontWeight: "bold",
+    fontSize: 14,
+  },
+  row: {
+    flexDirection: "row",
+    backgroundColor: "transparent",
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+  },
+  rowWithLine: {
+    borderBottomWidth: 1,
+    borderBottomColor: "#555",
+  },
+  cell: {
+    flex: 1,
+    textAlign: "center",
+    fontSize: 14,
+    color: "white",
+  },
+  switchCell: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  authorized: {
+    color: "green",
+  },
+  denied: {
+    color: "red",
+  },
+  textPadding: {
+    paddingTop: 50,
+    textAlign: "center",
+    color: "white",
+  },
+  noDataContainer: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    paddingTop: 100,
+  },
+  noDataText: {
+    color: "white",
+    fontSize: 16,
+    textAlign: "center",
   },
 });

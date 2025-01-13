@@ -16,11 +16,11 @@ bool flashState = false;
 using namespace websockets;
 
 // Configurações da rede Wi-Fi
-const char* ssid = "";         // Substitua pelo seu SSID
-const char* password = "";   // Substitua pela sua senha
+const char* ssid = "Mateus";         // Substitua pelo seu SSID
+const char* password = "12345678";   // Substitua pela sua senha
 
 // URL do servidor WebSocket
-const char* ws_server = "ws://0.tcp.sa.ngrok.io:16473";  // Substitua pelo IP/URL e porta do servidor WS
+const char* ws_server = "ws://0.tcp.sa.ngrok.io:11925";  // Substitua pelo IP/URL e porta do servidor WS
 
 WebsocketsClient wsClient;
 bool isConnected = false;
