@@ -9,6 +9,7 @@ import (
 	"io/ioutil"
 	"log"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"github.com/tarm/serial"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -232,6 +234,13 @@ func main() {
 			go server.handleClient(conn)
 		})
 
+		localIP, err := getLocalIP()
+		if err != nil {
+			log.Fatalf("Erro ao obter o IP local: %v", err)
+		}
+
+		fmt.Println("IP local:", localIP)
+
 		// Iniciar o servidor WebSocket na porta 8000
 		fmt.Println("Servidor WebSocket está rodando em: ws://localhost:8000/ws")
 		if err := http.ListenAndServe(":8000", nil); err != nil {
@@ -244,6 +253,7 @@ func main() {
 
 	// API RESTful
 	router.GET("/status", func(c *gin.Context) {
+		sendSerial("X")
 		c.JSON(http.StatusOK, gin.H{
 			"status": "Servidor em funcionamento",
 		})
@@ -251,7 +261,7 @@ func main() {
 
 	router.GET("/getAccess", func(c *gin.Context) {
 		var accessLogs []AccessLog
-		result := database.Find(&accessLogs).Order("id desc")
+		result := database.Find(&accessLogs).Order("id asc")
 		if result.Error != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"error": result.Error.Error(),
@@ -449,4 +459,42 @@ func sendPostRequest(url string, filePath string) (ProcessResponse, error) {
 	}
 
 	return data, nil
+}
+
+func getLocalIP() (string, error) {
+	// Conecta a um endereço remoto para descobrir o IP local
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+
+	// Obtém o endereço local associado à conexão
+	localAddr := conn.LocalAddr().(*net.UDPAddr)
+	return localAddr.IP.String(), nil
+}
+
+func sendSerial(message string) {
+	// Configuração da porta serial
+	config := &serial.Config{
+		Name: "/dev/ttyACM0", // Substitua pela sua porta (no Linux pode ser /dev/ttyUSB0 ou /dev/ttyACM0)
+		Baud: 9600,           // Velocidade em bauds, deve ser igual ao configurado no Arduino
+	}
+
+	// Abre a porta serial
+	port, err := serial.OpenPort(config)
+	if err != nil {
+		log.Fatalf("Erro ao abrir a porta serial: %v", err)
+	}
+	defer port.Close()
+
+	// Envia a mensagem caractere por caractere
+	for _, char := range message {
+		_, err = port.Write([]byte{byte(char)}) // Envia o caractere como byte
+		if err != nil {
+			log.Fatalf("Erro ao enviar o caractere '%c': %v", char, err)
+		}
+	}
+
+	fmt.Println("Mensagem enviada para o Arduino:", message)
 }
