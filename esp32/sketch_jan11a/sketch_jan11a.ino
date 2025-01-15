@@ -16,11 +16,11 @@ bool flashState = false;
 using namespace websockets;
 
 // Configurações da rede Wi-Fi
-const char* ssid = "Mateus";         // Substitua pelo seu SSID
-const char* password = "12345678";   // Substitua pela sua senha
+const char* ssid = "";         // Substitua pelo seu SSID
+const char* password = "";   // Substitua pela sua senha
 
 // URL do servidor WebSocket
-const char* ws_server = "ws://0.tcp.sa.ngrok.io:11925";  // Substitua pelo IP/URL e porta do servidor WS
+const char* ws_server = "ws://0.tcp.sa.ngrok.io:16071";  // Substitua pelo IP/URL e porta do servidor WS
 
 WebsocketsClient wsClient;
 bool isConnected = false;
@@ -34,15 +34,26 @@ String capturePhoto() {
     return "";
   }
 
+  // Limpar o buffer da câmera
+  esp_camera_fb_return(fb); // Libera o frame anterior
+
+  fb = esp_camera_fb_get(); // Captura um novo frame
+
+  if (!fb) {
+    Serial.println("Falha ao capturar o frame da câmera!");
+    return "";
+  }
+
   // Verificar se o tamanho do buffer é válido
   if (fb->len == 0) {
     Serial.println("Frame capturado está vazio!");
+    esp_camera_fb_return(fb);
     return "";
   }
 
   // Converte para Base64
   String imageBase64 = base64::encode(fb->buf, fb->len);
-  
+
   // Verificar se a conversão foi bem-sucedida
   if (imageBase64.length() == 0) {
     Serial.println("Falha ao codificar a imagem em Base64!");
@@ -50,8 +61,29 @@ String capturePhoto() {
     return "";
   }
 
+  // Liberar o buffer da câmera
   esp_camera_fb_return(fb);
+
   return imageBase64;
+}
+
+String capturePhotoWithRetries(int maxRetries = 3) {
+  String imageBase64;
+  int attempts = 0;
+
+  while (attempts < maxRetries) {
+    imageBase64 = capturePhoto();
+    if (!imageBase64.isEmpty()) {
+      return imageBase64;
+    }
+
+    Serial.printf("Tentativa %d de captura falhou, tentando novamente...\n", attempts + 1);
+    attempts++;
+    delay(100); // Pequeno intervalo antes de tentar novamente
+  }
+
+  Serial.println("Falha ao capturar imagem após múltiplas tentativas.");
+  return "";
 }
 
 // Função para conectar no Wi-Fi
@@ -81,12 +113,15 @@ void connectToWebSocket() {
   }
 }
 
-// Função para enviar mensagens
-void sendMessage() {
-  if (isConnected) {
-    wsClient.send("Olá, servidor!");  // Mensagem que será enviada
-    Serial.println("Mensagem enviada: Olá, servidor!");
+
+void sendPhoto(String photoBase64) {
+  if (photoBase64.isEmpty()) {
+    Serial.println("Imagem vazia, não será enviada.");
+    return;
   }
+
+  Serial.println("Enviando imagem...");
+  wsClient.send(photoBase64);
 }
 
 // Callback para lidar com mensagens recebidas
@@ -98,15 +133,24 @@ void onMessage(WebsocketsMessage message) {
     flashState = !flashState;
     digitalWrite(FLASH_PIN, flashState ? HIGH : LOW);    
     String state = flashState ? "flash ligado" : "flash desligado";
-    String messageToSend = "flash: " + state; // Adiciona o prefixo
     wsClient.send(state);
-    
   }
 
   if (message.data() == "foto"){
-    String photoBase64 = capturePhoto();    
-    String messageToSend = "base64: " + photoBase64; // Adiciona o prefixo
-    wsClient.send(messageToSend); // Envia o frame ao cliente
+    Serial.println("Iniciando captura e envio de foto...");
+    
+    // Capture a nova foto com tentativas
+    String photoBase64 = capturePhotoWithRetries(); 
+    
+    if (!photoBase64.isEmpty()) {
+        // Adiciona o prefixo 'base64:' antes de enviar
+        String messageToSend = "base64:" + photoBase64; 
+        Serial.println("Foto capturada e pronta para envio...");
+        sendPhoto(messageToSend);
+    } else {
+        Serial.println("Falha na captura da foto, não foi enviada.");
+        wsClient.send("Falha na captura da foto");
+    }
   }
 
   if (message.data() == "start_stream") {
@@ -121,7 +165,6 @@ void onMessage(WebsocketsMessage message) {
       delay(100); // Intervalo entre frames (10 FPS)
     }
   }
-
 }
 
 // Callback para lidar com eventos (ex.: desconexão)
@@ -192,29 +235,15 @@ void setup() {
   // Conecta ao Wi-Fi
   connectToWiFi();
   
-  // Configura o cliente WebSocket
+  // Conecta ao servidor WebSocket
+  connectToWebSocket();
+
+  // Configura os callbacks do WebSocket
   wsClient.onMessage(onMessage);
   wsClient.onEvent(onEvent);
-
-  // Tenta conectar ao servidor WebSocket
-  connectToWebSocket();
 }
 
-
-const long interval = 100; // Enviar imagens a cada 100ms (~10 FPS)
-
 void loop() {
-
-  // Mantém a conexão WebSocket
+  // Atualizar o WebSocket
   wsClient.poll();
-  
-  // Reconexão caso desconecte
-  if (!isConnected) {
-    static unsigned long lastReconnectAttempt = 0;
-    if (millis() - lastReconnectAttempt >= 5000) {
-      Serial.println("Tentando reconectar ao servidor WebSocket...");
-      connectToWebSocket();
-      lastReconnectAttempt = millis();
-    }
-  }
 }

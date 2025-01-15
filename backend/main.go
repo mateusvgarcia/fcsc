@@ -86,7 +86,7 @@ func (server *WebSocketServer) handleClient(conn *websocket.Conn) {
 			break
 		}
 
-		if strings.Contains(string(msg), "base64: ") {
+		if strings.Contains(string(msg), "base64:") {
 			err := os.MkdirAll("./results", os.ModePerm)
 			if err != nil {
 				fmt.Println("Erro ao criar a pasta:", err)
@@ -94,7 +94,28 @@ func (server *WebSocketServer) handleClient(conn *websocket.Conn) {
 			}
 
 			id := uuid.New()
-			err = saveBase64Image(string(msg[8:]), "./results/original_"+id.String()+".jpg")
+
+			// save to txt file
+			f, err := os.Create("./results/base64_" + id.String() + ".txt")
+			if err != nil {
+				fmt.Println("Erro ao criar o arquivo:", err)
+				return
+			}
+
+			_, err = f.WriteString(string(msg))
+			if err != nil {
+				fmt.Println("Erro ao escrever no arquivo:", err)
+				return
+			}
+
+			err = f.Close()
+
+			if err != nil {
+				fmt.Println("Erro ao fechar o arquivo:", err)
+				return
+			}
+
+			err = saveBase64Image(string(msg[7:]), "./results/original_"+id.String()+".jpg")
 			if err != nil {
 				fmt.Println("Erro:", err)
 			} else {
@@ -152,6 +173,8 @@ func (server *WebSocketServer) handleClient(conn *websocket.Conn) {
 			if result.Error != nil {
 				fmt.Println("Erro ao salvar no banco de dados:", result.Error)
 			}
+
+			// server.broadcast <- Message{sender: conn, message: msg}
 
 			continue
 		}
@@ -253,7 +276,6 @@ func main() {
 
 	// API RESTful
 	router.GET("/status", func(c *gin.Context) {
-		sendSerial("X")
 		c.JSON(http.StatusOK, gin.H{
 			"status": "Servidor em funcionamento",
 		})
@@ -387,6 +409,7 @@ func main() {
 
 func saveBase64Image(base64String, filePath string) error {
 	// Decodifica a string Base64
+	// fmt.Println(base64String)
 	data, err := base64.StdEncoding.DecodeString(base64String)
 	if err != nil {
 		return fmt.Errorf("erro ao decodificar base64: %v", err)
@@ -475,22 +498,19 @@ func getLocalIP() (string, error) {
 }
 
 func sendSerial(message string) {
-	// Configuração da porta serial
 	config := &serial.Config{
-		Name: "/dev/ttyACM0", // Substitua pela sua porta (no Linux pode ser /dev/ttyUSB0 ou /dev/ttyACM0)
-		Baud: 9600,           // Velocidade em bauds, deve ser igual ao configurado no Arduino
+		Name: "/dev/ttyACM0",
+		Baud: 9600,
 	}
 
-	// Abre a porta serial
 	port, err := serial.OpenPort(config)
 	if err != nil {
 		log.Fatalf("Erro ao abrir a porta serial: %v", err)
 	}
 	defer port.Close()
 
-	// Envia a mensagem caractere por caractere
 	for _, char := range message {
-		_, err = port.Write([]byte{byte(char)}) // Envia o caractere como byte
+		_, err = port.Write([]byte{byte(char)})
 		if err != nil {
 			log.Fatalf("Erro ao enviar o caractere '%c': %v", char, err)
 		}
